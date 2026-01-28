@@ -13,8 +13,9 @@
 
 # Output file name
 OUTPUT=$1        
+CGROUP_NAME=$2
 
 while true; do
-  head -n 2 /sys/fs/cgroup/memlim/memory.stat >> "${OUTPUT}"
+  head -n 2 /sys/fs/cgroup/${CGROUP_NAME}/memory.stat >> "${OUTPUT}"
   sleep 1
 done
