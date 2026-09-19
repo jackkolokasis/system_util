@@ -1,70 +1,63 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
-# Print error/usage script message
 usage() {
-    echo
-    echo "Usage:"
-    echo -n "      $0 [option ...] "
-    echo
-    echo "Options:"
-    echo "      -r  Directory with results"
-    echo "      -d  Devices to monitor"
-    echo "      -h  Show usage"
-    echo
+  cat <<EOF
+Usage: $0 -r RESULT_DIR -d DEVICE [-d DEVICE ...]
 
-    exit 1
+Options:
+  -r  Directory with raw statistics
+  -d  Block device to summarize; may be repeated
+  -h  Show this help
+EOF
+  exit 1
 }
 
-# Check for the input arguments
-while getopts "r:d:h" opt
-do
-    case "${opt}" in
-        r)
-          RESULT_DIR="${OPTARG}"
-          ;;
-        d)
-          DEVICES+=(-d "${OPTARG}")
-          ;;
-        h)
-          usage
-          ;;
-        *)
-          usage
-          ;;
-      esac
-    done
+RESULT_DIR=""
+DEVICES=()
+while getopts ":r:d:h" opt; do
+  case "${opt}" in
+    r) RESULT_DIR="${OPTARG}" ;;
+    d) DEVICES+=("${OPTARG}") ;;
+    h) usage ;;
+    *) usage ;;
+  esac
+done
+[[ -n "${RESULT_DIR}" ]] || usage
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
+python3 "${SCRIPT_DIR}/parse_system_stats.py" \
+  --result-dir "${RESULT_DIR}" \
+  --output "${RESULT_DIR}/system.csv"
 
-# Calculate averages for user, systet, iowait, idle and cpu utilization
-USR_UTIL=$(grep all "${RESULT_DIR}"/mpstat-* | head -n -1 | awk '{ print $4 }' \
-	| grep -v "0,00" | awk -F ',' '{print $1"."$2}' \
-	| awk '{ sum += $1; n++ } END { if (n > 0) print (sum / n); }')
-SYS_UTIL=$(grep all "${RESULT_DIR}"/mpstat-* | head -n -1 | awk '{ print $6 }' \
-	| grep -v "0,00" | awk -F ',' '{print $1"."$2}' \
-	| awk '{ sum += $1; n++ } END { if (n > 0) print (sum / n); }')
-IOW_UTIL=$(grep all "${RESULT_DIR}"/mpstat-* | head -n -1 | awk '{ print $7 }' \
-	| grep -v "0,00" | awk -F ',' '{print $1"."$2}' \
-	| awk '{ sum += $1; n++ } END { if (n > 0) print (sum / n); }')
-IDL_UTIL=$(grep all "${RESULT_DIR}"/mpstat-* | head -n -1 | awk '{ print $13 }'\
-	| grep -v "0,00" | awk -F ',' '{print $1"."$2}' \
-	| awk '{ sum += $1; n++ } END { if (n > 0) print (sum / n); }')
+# Prefer the new deterministic names, but accept historical result directories.
+IOSTAT="${RESULT_DIR}/iostat.txt"
+BEFORE="${RESULT_DIR}/diskstats.before"
+AFTER="${RESULT_DIR}/diskstats.after"
 
-CPU_UTIL=$(grep all "${RESULT_DIR}"/mpstat-* | head -n -1 | awk '{ print $13 }' \
-	| grep -v "0,00" | awk -F ',' '{print $1"."$2}' \
-	| awk '{ sum += $1; n++ } END { if (n > 0) print 100 - (sum / n); }')
+if [[ ! -f "${IOSTAT}" ]]; then
+  IOSTAT=$(find "${RESULT_DIR}" -maxdepth 1 -type f -name 'iostat-*' | sort | tail -n1)
+fi
+if [[ ! -f "${BEFORE}" ]]; then
+  BEFORE=$(find "${RESULT_DIR}" -maxdepth 1 -type f -name 'diskstats-before-*' | sort | tail -n1)
+fi
+if [[ ! -f "${AFTER}" ]]; then
+  AFTER=$(find "${RESULT_DIR}" -maxdepth 1 -type f -name 'diskstats-after-*' | sort | tail -n1)
+fi
 
-{
-  echo "USR_UTIL(%),${USR_UTIL}" 
-  echo "SYS_UTIL(%),${SYS_UTIL}"
-  echo "IOW_UTIL(%),${IOW_UTIL}"
-  echo "IDL_UTIL(%),${IDL_UTIL}"
-  echo "CPU_UTIL(%),${CPU_UTIL}"
-} >> "${RESULT_DIR}"/system.csv
+if (( ${#DEVICES[@]} > 0 )) && [[ -n "${IOSTAT:-}" && -f "${IOSTAT}" && -n "${BEFORE:-}" && -f "${BEFORE}" && -n "${AFTER:-}" && -f "${AFTER}" ]]; then
+  disk_args=(-b "${BEFORE}" -a "${AFTER}" -s "${IOSTAT}" -r "${RESULT_DIR}")
+  for dev in "${DEVICES[@]}"; do
+    disk_args+=(-d "${dev}")
+  done
+  "${SCRIPT_DIR}/disk_util.sh" "${disk_args[@]}"
+else
+  echo "WARNING: disk statistics are incomplete; skipping disk summary" >&2
+fi
 
-# Extract the statistics of storage devices utilization
-"$(pwd)"/system_util/disk_util.sh \
-	-b "${RESULT_DIR}"/diskstats-before-* \
-	-a "${RESULT_DIR}"/diskstats-after-* \
-	-s "${RESULT_DIR}"/iostat-* \
-  -r "${RESULT_DIR}" \
-  "${DEVICES[@]}"
+# Plot memory if a compatible trace is present.
+if [[ -f "${RESULT_DIR}/mem_usage.txt" ]]; then
+  python3 "${SCRIPT_DIR}/plot_memusage.py" \
+    -i "${RESULT_DIR}/mem_usage.txt" \
+    -o "${RESULT_DIR}/plots/mem_usage.png" || true
+fi

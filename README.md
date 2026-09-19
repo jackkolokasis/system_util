@@ -1,49 +1,65 @@
-## System Utilization Statistics
+# system_util changes
 
-Collect and plot system statistics such as CPU utilization and disk utilization
-metrics.
+## CPU accounting
 
-## Prerequisites
-You need to install python3 and matplotlib
-```
-sudo yum install python3
-sudo yum install python3-pip
-pip3 install matplotlib
-```
+`start_statistics.sh` snapshots cgroup-v2 `cpu.stat` before the measured phase and
+`stop_statistics.sh` snapshots it again at the end. `extract-data.sh` computes
+actual cgroup CPU seconds and normalizes average utilization to the configured
+Spark executor-core capacity.
 
-Edit the ./extract-data.sh and fix the path to the disk_util.sh file:
-```sh
-"$(pwd)"/system_util/disk_util.sh \
-	-b "${RESULT_DIR}"/diskstats-before-* \
-	-a "${RESULT_DIR}"/diskstats-after-* \
-	-s "${RESULT_DIR}"/iostat-* \
-  -r "${RESULT_DIR}" \
-  "${DEVICES[@]}"
+`run.sh` now calls:
+
+```bash
+./system_util/start_statistics.sh \
+  -d "${RUN_DIR}" \
+  -g memlim \
+  -c "$(( ACTIVE_EXEC_CORES * ACTIVE_NUM_EXECUTORS ))"
 ```
 
-Edit the ./disk_util.sh and fix the path to the plot_iostat.sh file:
-```sh
-"$(pwd)"/system_util/plot_iostat.py \
-  -i ${IOSTAT} \
-  -o ${RESULT_DIR}/plots \
-  -s ${DEVICES[0]}
+The main CPU fields in `system.csv` are:
+
+- `CGROUP_CPU_TIME_S`: actual CPU seconds charged to the Spark cgroup.
+- `CGROUP_USER_CPU_TIME_S`: actual user CPU seconds.
+- `CGROUP_SYSTEM_CPU_TIME_S`: actual kernel/system CPU seconds.
+- `AVG_CORES_USED`: average fully-utilized CPU equivalents during measurement.
+- `CPU_UTIL_ALLOCATED(%)`: `AVG_CORES_USED / configured_executor_cores * 100`.
+- `HOST_*`: host-wide mpstat metrics, retained separately.
+
+`CPU_UTIL_ALLOCATED(%)` can exceed 100% because Spark executor cores are task
+slots, not an OS CPU quota or CPU affinity mask. GC, driver, worker, and other
+threads in the cgroup can use additional CPUs. If a strict N-core experiment is
+required, use cpuset/cpu.max in addition to this accounting.
+
+## iostat
+
+Collection uses:
+
+```bash
+LC_ALL=C iostat -x -m -y 1
 ```
-## Configure
-Before run set in disk_util.sh file the devices that you want to get metrics by
-setting DEVICES variable.
 
-## How to Run
-```
-./start_statistics.sh -d <directory/with/results>
-....
-your application
-....
-./stop_statistics.sh -d <directory/with/results>
+`-y` suppresses the first report (which otherwise represents time since boot),
+and `LC_ALL=C` stabilizes headers and decimal separators. Parsing is by header
+name rather than fixed column offsets, so both older and newer sysstat layouts
+are supported. The parser handles old `avgrq-sz/avgqu-sz` and newer
+`rareq-sz/wareq-sz/aqu-sz` layouts, and either MB/s or kB/s throughput fields.
 
-./extract-data.sh -r <directory/with/results> -d <dev1> -d <dev2>
+`/proc/diskstats` devices are matched exactly by device name and read/write
+sector deltas are converted with 512 bytes per kernel sector.
 
-```
+## Process lifetime
 
-##TODO:
-Add a configuration file
+The monitor PIDs are stored per result directory. `stop_statistics.sh` kills
+only those PIDs instead of running global `killall -9 iostat mpstat`.
 
+## Files
+
+- `start_statistics.sh` / `stop_statistics.sh`: collection lifecycle.
+- `extract-data.sh`: aggregate extraction.
+- `parse_system_stats.py`: mpstat + cgroup CPU parser.
+- `disk_util.sh` / `parse_iostat.py`: robust disk parser.
+- `plot_iostat.py`: header-driven iostat plots.
+- `mem_usage.sh`: no longer assumes anon/file are the first two memory.stat lines.
+- `plot_memusage.py`: fixed matplotlib backend ordering and cleanup.
+- `run.sh`: passes configured executor-core capacity to system statistics.
+- `parse_results.sh`: consumes actual cgroup CPU seconds when available.
